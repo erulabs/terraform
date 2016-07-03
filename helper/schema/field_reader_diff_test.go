@@ -1,9 +1,14 @@
 package schema
 
 import (
+	"bytes"
+	"fmt"
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform/helper/hashcode"
 	"github.com/hashicorp/terraform/terraform"
 )
 
@@ -987,5 +992,291 @@ func TestDiffFieldReader_SetInList_deeplyNested_singleInstance(t *testing.T) {
 	if !reflect.DeepEqual(expectedInInnerSet, m2) {
 		t.Fatalf("Expected in_inner_set to match:\nGiven: %#v\nExpected: %#v\n",
 			m2, expectedInInnerSet)
+	}
+}
+
+func TestDiffFieldReader_setItemRemoved(t *testing.T) {
+	resourceAwsElbListenerHash := func(v interface{}) int {
+		var buf bytes.Buffer
+		m := v.(map[string]interface{})
+		buf.WriteString(fmt.Sprintf("%d-", m["instance_port"].(int)))
+		buf.WriteString(fmt.Sprintf("%s-",
+			strings.ToLower(m["instance_protocol"].(string))))
+		buf.WriteString(fmt.Sprintf("%d-", m["lb_port"].(int)))
+		buf.WriteString(fmt.Sprintf("%s-",
+			strings.ToLower(m["lb_protocol"].(string))))
+
+		if v, ok := m["ssl_certificate_id"]; ok {
+			buf.WriteString(fmt.Sprintf("%s-", v.(string)))
+		}
+
+		return hashcode.String(buf.String())
+	}
+
+	schema := map[string]*Schema{
+		"listener": &Schema{
+			Type:     TypeSet,
+			Required: true,
+			Elem: &Resource{
+				Schema: map[string]*Schema{
+					"instance_port": &Schema{
+						Type:     TypeInt,
+						Required: true,
+					},
+
+					"instance_protocol": &Schema{
+						Type:     TypeString,
+						Required: true,
+					},
+
+					"lb_port": &Schema{
+						Type:     TypeInt,
+						Required: true,
+					},
+
+					"lb_protocol": &Schema{
+						Type:     TypeString,
+						Required: true,
+					},
+
+					"ssl_certificate_id": &Schema{
+						Type:     TypeString,
+						Optional: true,
+					},
+				},
+			},
+			Set: resourceAwsElbListenerHash,
+		},
+
+		"tags": &Schema{
+			Type:     TypeMap,
+			Optional: true,
+		},
+	}
+
+	var readers = make(map[string]FieldReader)
+	readers["state"] = &MapFieldReader{
+		Schema: schema,
+		Map: BasicMapReader(map[string]string{
+			"id":                                    "tf-lb-t77qtnbbm5dczcnker4c7boj7m",
+			"listener.#":                            "1",
+			"listener.206423021.instance_port":      "8000",
+			"listener.206423021.instance_protocol":  "http",
+			"listener.206423021.lb_port":            "80",
+			"listener.206423021.lb_protocol":        "http",
+			"listener.206423021.ssl_certificate_id": "",
+			"tags.%":   "1",
+			"tags.bar": "baz",
+		}),
+	}
+
+	dfr := &DiffFieldReader{
+		Schema: schema,
+		Diff: &terraform.InstanceDiff{
+			Attributes: map[string]*terraform.ResourceAttrDiff{
+				"listener.3931999347.ssl_certificate_id": &terraform.ResourceAttrDiff{
+					Old: "", New: "", NewRemoved: false,
+				},
+				"tags.bar": &terraform.ResourceAttrDiff{
+					Old: "baz", New: "", NewRemoved: true,
+				},
+				"listener.206423021.instance_port": &terraform.ResourceAttrDiff{
+					Old: "8000", New: "0", NewRemoved: true,
+				},
+				"listener.206423021.lb_port": &terraform.ResourceAttrDiff{
+					Old: "80", New: "0", NewRemoved: true,
+				},
+				"listener.206423021.lb_protocol": &terraform.ResourceAttrDiff{
+					Old: "http", New: "", NewRemoved: true,
+				},
+				"listener.206423021.ssl_certificate_id": &terraform.ResourceAttrDiff{
+					Old: "", New: "", NewRemoved: true,
+				},
+				"listener.3931999347.instance_protocol": &terraform.ResourceAttrDiff{
+					Old: "", New: "http", NewRemoved: false,
+				},
+				"listener.206423021.instance_protocol": &terraform.ResourceAttrDiff{
+					Old: "http", New: "", NewRemoved: true,
+				},
+				"listener.3931999347.instance_port": &terraform.ResourceAttrDiff{
+					Old: "", New: "8080", NewRemoved: false,
+				},
+				"listener.3931999347.lb_port": &terraform.ResourceAttrDiff{
+					Old: "", New: "80", NewRemoved: false,
+				},
+				"listener.3931999347.lb_protocol": &terraform.ResourceAttrDiff{
+					Old: "", New: "http", NewRemoved: false,
+				},
+				"tags.%": &terraform.ResourceAttrDiff{
+					Old: "1", New: "0", NewRemoved: false,
+				},
+			},
+		},
+		Source: &MultiLevelFieldReader{
+			Levels:  []string{"state", "config"},
+			Readers: readers,
+		},
+	}
+
+	result, err := dfr.ReadField([]string{"listener"})
+	if err != nil {
+		t.Fatalf("ReadField failed: %s", err)
+	}
+	expectedResult := NewSet(resourceAwsElbListenerHash, []interface{}{
+		map[string]interface{}{
+			"lb_port":            80,
+			"lb_protocol":        "http",
+			"ssl_certificate_id": "",
+			"instance_port":      8080,
+			"instance_protocol":  "http",
+		},
+	})
+	if !expectedResult.Equal(result.Value) {
+		t.Fatalf("ReadField returned unexpected result.\nGiven: %#v\nexpected: %#v",
+			result, expectedResult)
+	}
+}
+
+func TestDiffFieldReader_CodeDeploy_special(t *testing.T) {
+	resourceAwsCodeDeployTriggerConfigHash := func(v interface{}) int {
+		var buf bytes.Buffer
+		m := v.(map[string]interface{})
+		if v, ok := m["trigger_name"]; ok {
+			buf.WriteString(fmt.Sprintf("%s-", v.(string)))
+		}
+		if v, ok := m["trigger_target_arn"]; ok {
+			buf.WriteString(fmt.Sprintf("%s-", v.(string)))
+		}
+
+		if triggerEvents, ok := m["trigger_events"]; ok {
+			names := triggerEvents.(*Set).List()
+			strings := make([]string, len(names))
+			for i, raw := range names {
+				strings[i] = raw.(string)
+			}
+			sort.Strings(strings)
+
+			for _, s := range strings {
+				buf.WriteString(fmt.Sprintf("%s-", s))
+			}
+		}
+		return hashcode.String(buf.String())
+	}
+	schema := map[string]*Schema{
+		"trigger_configuration": &Schema{
+			Type:     TypeSet,
+			Optional: true,
+			Elem: &Resource{
+				Schema: map[string]*Schema{
+					"trigger_events": &Schema{
+						Type:     TypeSet,
+						Required: true,
+						Set:      HashString,
+						Elem: &Schema{
+							Type: TypeString,
+						},
+					},
+
+					"trigger_name": &Schema{
+						Type:     TypeString,
+						Required: true,
+					},
+
+					"trigger_target_arn": &Schema{
+						Type:     TypeString,
+						Required: true,
+					},
+				},
+			},
+			Set: resourceAwsCodeDeployTriggerConfigHash,
+		},
+	}
+
+	var readers = make(map[string]FieldReader)
+	readers["state"] = &MapFieldReader{
+		Schema: schema,
+		Map: BasicMapReader(map[string]string{
+			"id": "b62bb84c-2d61-42b2-a50c-b629bf76027d",
+			"trigger_configuration.#":                                    "1",
+			"trigger_configuration.2509701091.trigger_events.#":          "1",
+			"trigger_configuration.2509701091.trigger_events.4157777861": "DeploymentFailure",
+			"trigger_configuration.2509701091.trigger_name":              "foo-trigger",
+			"trigger_configuration.2509701091.trigger_target_arn":        "arn:aws:sns:us-west-2:123456789012:foo-topic-rsimko-test",
+		}),
+	}
+
+	dfr := &DiffFieldReader{
+		Schema: schema,
+		Diff: &terraform.InstanceDiff{
+			Attributes: map[string]*terraform.ResourceAttrDiff{
+				"trigger_configuration.2509701091.trigger_target_arn": &terraform.ResourceAttrDiff{
+					Old: "arn:aws:sns:us-west-2:123456789012:foo-topic-rsimko-test", New: "",
+					NewComputed: false, NewRemoved: true,
+				},
+				"trigger_configuration.2509701091.trigger_events.#": &terraform.ResourceAttrDiff{
+					Old: "1", New: "0",
+					NewComputed: false, NewRemoved: false,
+				},
+				"trigger_configuration.2509701091.trigger_events.4157777861": &terraform.ResourceAttrDiff{
+					Old: "DeploymentFailure", New: "",
+					NewComputed: false, NewRemoved: true,
+				},
+				"trigger_configuration.2509701091.trigger_name": &terraform.ResourceAttrDiff{
+					Old: "foo-trigger", New: "",
+					NewComputed: false, NewRemoved: true,
+				},
+
+				"trigger_configuration.3738386998.trigger_events.#": &terraform.ResourceAttrDiff{
+					Old: "0", New: "2",
+					NewComputed: false, NewRemoved: false,
+				},
+				"trigger_configuration.3738386998.trigger_name": &terraform.ResourceAttrDiff{
+					Old: "", New: "foo-trigger",
+					NewComputed: false, NewRemoved: false,
+				},
+				"trigger_configuration.3738386998.trigger_events.4157777861": &terraform.ResourceAttrDiff{
+					Old: "", New: "DeploymentFailure",
+					NewComputed: false, NewRemoved: false,
+				},
+				"trigger_configuration.3738386998.trigger_events.3108600758": &terraform.ResourceAttrDiff{
+					Old: "", New: "DeploymentSuccess",
+					NewComputed: false, NewRemoved: false,
+				},
+				"trigger_configuration.3738386998.trigger_target_arn": &terraform.ResourceAttrDiff{
+					Old: "", New: "arn:aws:sns:us-west-2:123456789012:foo-topic-rsimko-test",
+					NewComputed: false, NewRemoved: false,
+				},
+			},
+			Destroy:        false,
+			DestroyTainted: false,
+		},
+		Source: &MultiLevelFieldReader{
+			Levels:  []string{"state", "config"},
+			Readers: readers,
+		},
+	}
+
+	result, err := dfr.ReadField([]string{"trigger_configuration"})
+	if err != nil {
+		t.Fatalf("ReadField failed: %s", err)
+	}
+
+	list := result.Value.(*Set).List()
+	m := list[0].(map[string]interface{})
+
+	expectedEvents := NewSet(HashString, []interface{}{"DeploymentSuccess", "DeploymentFailure"})
+	if !m["trigger_events"].(*Set).Equal(expectedEvents) {
+		t.Fatalf("ReadField returned unexpected trigger_events.\nGiven: %#v\nexpected: %#v",
+			m["trigger_events"].(*Set).List(), expectedEvents.List())
+	}
+	delete(m, "trigger_events")
+
+	expectedResult := map[string]interface{}{
+		"trigger_name":       "foo-trigger",
+		"trigger_target_arn": "arn:aws:sns:us-west-2:123456789012:foo-topic-rsimko-test",
+	}
+	if !reflect.DeepEqual(m, expectedResult) {
+		t.Fatalf("ReadField returned unexpected result.\nGiven: %#v\nexpected: %#v",
+			m, expectedResult)
 	}
 }

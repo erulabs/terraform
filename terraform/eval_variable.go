@@ -21,10 +21,6 @@ import (
 //       declared
 //     - the path to the module (so we know which part of the tree to
 //       compare the values against).
-//
-// Currently since the type system is simple, we currently do not make
-// use of the values since it is only valid to pass string values. The
-// structure is in place for extension of the type system, however.
 type EvalTypeCheckVariable struct {
 	Variables  map[string]interface{}
 	ModulePath []string
@@ -81,6 +77,12 @@ func (n *EvalTypeCheckVariable) Eval(ctx EvalContext) (interface{}, error) {
 			case map[string]interface{}:
 				continue
 			default:
+				if list, ok := proposedValue.([]interface{}); ok && len(list) == 1 {
+					if m, ok := list[0].(map[string]interface{}); ok {
+						n.Variables[name] = m
+						continue
+					}
+				}
 				return nil, fmt.Errorf("variable %s%s should be type %s, got %s",
 					name, modulePathDescription, declaredType.Printable(), hclTypeName(proposedValue))
 			}

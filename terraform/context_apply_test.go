@@ -4704,3 +4704,54 @@ aws_instance.foo:
 		t.Fatalf("bad: \n%s", actual)
 	}
 }
+
+func TestContext2Apply_moduleMapLiteral(t *testing.T) {
+	m := testModule(t, "apply-module-map-literal")
+	p := testProvider("aws")
+	p.ApplyFn = testApplyFn
+	p.DiffFn = func(i *InstanceInfo, s *InstanceState, c *ResourceConfig) (*InstanceDiff, error) {
+		val, _ := c.Get("tags")
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			t.Fatalf("Tags attr not map: %#v", val)
+		}
+		if m["foo"] != "bar" {
+			t.Fatalf("Bad value in tags attr: %#v", m)
+		}
+		return &InstanceDiff{
+			Attributes: map[string]*ResourceAttrDiff{
+				"tagskey": &ResourceAttrDiff{
+					New: m["foo"].(string),
+				},
+			},
+		}, nil
+	}
+	ctx := testContext2(t, &ContextOpts{
+		Module: m,
+		Providers: map[string]ResourceProviderFactory{
+			"aws": testProviderFuncFixed(p),
+		},
+	})
+
+	if _, err := ctx.Plan(); err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	state, err := ctx.Apply()
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	actual := strings.TrimSpace(state.String())
+	expected := strings.TrimSpace(`
+<no state>
+module.child:
+  aws_instance.foo:
+    ID = foo
+    tagskey = bar
+`)
+	if actual != expected {
+		t.Fatalf("expected:\n%s\n\ngot:\n%s\n\n",
+			expected, actual)
+	}
+}
